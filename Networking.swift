@@ -23,12 +23,13 @@ THE SOFTWARE.
 import Foundation
 import Alamofire
 import ObjectMapper
+import FBSDKCoreKit
 
 class Networking {
-    // MARK: Properties
+    // MARK: - Properties
     var sessionManager = SessionManager()
     
-    // MARK: Typealias
+    // MARK: - Typealias
     fileprivate typealias JSONFormat = [String: Any]
     
     /**
@@ -39,14 +40,32 @@ class Networking {
      error: A closure for the error Mappable type response
      failure: API Request Failure which contains the localized description
      */
-    func request<T: Mappable, E:Mappable>(convertible: URLRequestConvertible, success: @escaping (_ value: T) -> Void, error: @escaping (_ error: E) -> Void, failure: @escaping (_ error: String) -> Void) {
+    func request<T: Mappable, E:Mappable>(convertible: URLRequestConvertible,
+                 success: @escaping (_ value: T) -> Void,
+                 error: @escaping (_ error: E) -> Void,
+                 emptyResponse: ((_ response: EmptyResponseResult) -> Void)? = nil,
+                 failure: @escaping (_ error: String) -> Void) {
         sessionManager.request(convertible).responseJSON { (data) in
+            // If we have a 401 on the login screen we can skip this logic since its a invalid login
+            if data.response?.statusCode == 401 && !((UIApplication.shared.delegate as? AppDelegate)?.window?.rootViewController is HomeOnBoardingViewController) {
+                if FBSDKAccessToken.current() != nil {
+                    self.token(refresh: {
+                       self.request(convertible: convertible, success: success, error: error, emptyResponse: emptyResponse, failure: failure)
+                    })
+                } else {
+                    (UIApplication.shared.delegate as? AppDelegate)?.userLoggedOut()
+                }
+                return
+            }
+            
             switch data.result {
             case .success:
-                if let value = data.result.value as? JSONFormat, let result = T(JSON: value), self.containsValues(object: result) {
-                    success(result)
-                } else if let value = data.result.value as? JSONFormat, let result = E(JSON: value), self.containsValues(object: result) {
+                if let value = data.result.value as? JSONFormat, let result = E(JSON: value), self.containsValues(object: result) {
                     error(result)
+                } else if let value = data.result.value as? JSONFormat, let result = T(JSON: value) {
+                    success(result)
+                } else if data.result.value != nil, let emptyResponse = emptyResponse {
+                    emptyResponse(EmptyResponseResult.delete)
                 }
             case .failure(let error):
                 failure(error.localizedDescription)
@@ -64,12 +83,22 @@ class Networking {
      */
     func request<T: Mappable, E:Mappable>(convertible: URLRequestConvertible, success: @escaping (_ value: [T]) -> Void, error: @escaping (_ error: E) -> Void, failure: @escaping (_ error: String) -> Void) {
         sessionManager.request(convertible).responseJSON { (data) in
+            if data.response?.statusCode == 401 {
+                if FBSDKAccessToken.current() != nil {
+                    self.token(refresh: {
+                        self.request(convertible: convertible, success: success, error: error, failure: failure)
+                    })
+                } else {
+                    (UIApplication.shared.delegate as? AppDelegate)?.userLoggedOut()
+                }
+                return
+            }
             switch data.result {
             case .success:
                 if let value = data.result.value as? JSONFormat, let result = E(JSON: value), self.containsValues(object: result) {
                     error(result)
-                } else if let value = data.result.value as? [JSONFormat], let result = Mapper<T>().mapArray(JSONArray: value) {
-                    success(result)
+                } else if let value = data.result.value as? [JSONFormat] {
+                    success(Mapper<T>().mapArray(JSONArray: value))
                 }
             case .failure(let error):
                 failure(error.localizedDescription)
